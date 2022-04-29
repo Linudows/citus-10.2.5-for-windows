@@ -1,0 +1,147 @@
+--
+-- MULTI_JOIN_PRUNING
+--
+-- Check that join-pruning works for joins between two relations. For now
+-- we only check for join-pruning between locally partitioned relations. In the
+-- future we want to check for pruning between re-partitioned relations as well.
+SET citus.explain_distributed_queries TO off;
+SET client_min_messages TO DEBUG2;
+SELECT sum(l_linenumber), avg(l_linenumber) FROM lineitem, orders
+	WHERE l_orderkey = o_orderkey;
+DEBUG:  Router planner does not support append-partitioned tables.
+DEBUG:  join prunable for intervals [1,5986] and [8997,14947]
+DEBUG:  join prunable for intervals [8997,14947] and [1,5986]
+  sum  |        avg
+---------------------------------------------------------------------
+ 36089 | 3.0074166666666667
+(1 row)
+
+SELECT sum(l_linenumber), avg(l_linenumber) FROM lineitem, orders
+	WHERE l_orderkey = o_orderkey AND l_orderkey > 9030;
+DEBUG:  Router planner does not support append-partitioned tables.
+DEBUG:  join prunable for intervals [8997,14947] and [1,5986]
+  sum  |        avg
+---------------------------------------------------------------------
+ 17999 | 3.0189533713518953
+(1 row)
+
+-- Shards for the lineitem table have been pruned away. Check that join pruning
+-- works as expected in this case.
+SELECT sum(l_linenumber), avg(l_linenumber) FROM lineitem, orders
+	WHERE l_orderkey = o_orderkey AND l_orderkey > 20000;
+DEBUG:  Router planner does not support append-partitioned tables.
+ sum | avg
+---------------------------------------------------------------------
+     |
+(1 row)
+
+-- Partition pruning left three shards for the lineitem and one shard for the
+-- orders table. These shard sets don't overlap, so join pruning should prune
+-- out all the shards, and leave us with an empty task list.
+select * from pg_dist_shard
+where logicalrelid='lineitem'::regclass or
+	  logicalrelid='orders'::regclass
+order by shardid;
+ logicalrelid | shardid | shardstorage | shardminvalue | shardmaxvalue
+---------------------------------------------------------------------
+ lineitem     |  290000 | t            | 1             | 5986
+ lineitem     |  290001 | t            | 8997          | 14947
+ orders       |  290002 | t            | 1             | 5986
+ orders       |  290003 | t            | 8997          | 14947
+(4 rows)
+
+set citus.explain_distributed_queries to on;
+-- explain the query before actually executing it
+EXPLAIN SELECT sum(l_linenumber), avg(l_linenumber) FROM lineitem, orders
+	WHERE l_orderkey = o_orderkey AND l_orderkey > 6000 AND o_orderkey < 6000;
+DEBUG:  Router planner does not support append-partitioned tables.
+DEBUG:  join prunable for intervals [8997,14947] and [1,5986]
+                                 QUERY PLAN
+---------------------------------------------------------------------
+ Aggregate  (cost=750.01..750.02 rows=1 width=40)
+   ->  Custom Scan (Citus Adaptive)  (cost=0.00..0.00 rows=100000 width=24)
+         Task Count: 0
+         Tasks Shown: All
+(4 rows)
+
+set citus.explain_distributed_queries to off;
+set client_min_messages to debug3;
+SELECT sum(l_linenumber), avg(l_linenumber) FROM lineitem, orders
+	WHERE l_orderkey = o_orderkey AND l_orderkey > 6000 AND o_orderkey < 6000;
+DEBUG:  Router planner does not support append-partitioned tables.
+DEBUG:  constraint (gt) value: '6000'::bigint
+DEBUG:  shard count after pruning for lineitem: 1
+DEBUG:  constraint (lt) value: '6000'::bigint
+DEBUG:  shard count after pruning for orders: 1
+DEBUG:  join prunable for intervals [8997,14947] and [1,5986]
+ sum | avg
+---------------------------------------------------------------------
+     |
+(1 row)
+
+set client_min_messages to debug2;
+-- Make sure that we can handle filters without a column
+SELECT sum(l_linenumber), avg(l_linenumber) FROM lineitem, orders
+	WHERE l_orderkey = o_orderkey AND false;
+DEBUG:  Router planner does not support append-partitioned tables.
+ sum | avg
+---------------------------------------------------------------------
+     |
+(1 row)
+
+SELECT sum(l_linenumber), avg(l_linenumber)
+    FROM lineitem INNER JOIN orders ON (l_orderkey = o_orderkey)
+	WHERE false;
+DEBUG:  Router planner does not support append-partitioned tables.
+ sum | avg
+---------------------------------------------------------------------
+     |
+(1 row)
+
+-- These tests check that we can do join pruning for tables partitioned over
+-- different type of columns including varchar, array types, composite types
+-- etc. This is in response to a bug we had where we were not able to resolve
+-- correct operator types for some kind of column types.
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+	FROM array_partitioned_table table1, array_partitioned_table table2
+	WHERE table1.array_column = table2.array_column;
+DEBUG:  Router planner does not support append-partitioned tables.
+DEBUG:  join prunable for intervals [{},{AZZXSP27F21T6,AZZXSP27F21T6}] and [{BA1000U2AMO4ZGX,BZZXSP27F21T6},{CA1000U2AMO4ZGX,CZZXSP27F21T6}]
+DEBUG:  join prunable for intervals [{BA1000U2AMO4ZGX,BZZXSP27F21T6},{CA1000U2AMO4ZGX,CZZXSP27F21T6}] and [{},{AZZXSP27F21T6,AZZXSP27F21T6}]
+                             QUERY PLAN
+---------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (Citus Adaptive)
+         explain statements for distributed queries are not enabled
+(3 rows)
+
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+	FROM composite_partitioned_table table1, composite_partitioned_table table2
+	WHERE table1.composite_column = table2.composite_column;
+DEBUG:  Router planner does not support append-partitioned tables.
+DEBUG:  join prunable for intervals [(a,3,b),(b,4,c)] and [(c,5,d),(d,6,e)]
+DEBUG:  join prunable for intervals [(c,5,d),(d,6,e)] and [(a,3,b),(b,4,c)]
+                             QUERY PLAN
+---------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (Citus Adaptive)
+         explain statements for distributed queries are not enabled
+(3 rows)
+
+-- Test that large table joins on partition varchar columns work
+EXPLAIN (COSTS OFF)
+SELECT count(*)
+	FROM varchar_partitioned_table table1, varchar_partitioned_table table2
+	WHERE table1.varchar_column = table2.varchar_column;
+DEBUG:  Router planner does not support append-partitioned tables.
+DEBUG:  join prunable for intervals [AA1000U2AMO4ZGX,AZZXSP27F21T6] and [BA1000U2AMO4ZGX,BZZXSP27F21T6]
+DEBUG:  join prunable for intervals [BA1000U2AMO4ZGX,BZZXSP27F21T6] and [AA1000U2AMO4ZGX,AZZXSP27F21T6]
+                             QUERY PLAN
+---------------------------------------------------------------------
+ Aggregate
+   ->  Custom Scan (Citus Adaptive)
+         explain statements for distributed queries are not enabled
+(3 rows)
+
