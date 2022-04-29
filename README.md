@@ -1,4 +1,7 @@
 Citus 10.2.5 Windows Version by Linudows
+1. Please refer yourself to PostgreSQL 14.2 for Windows
+2. Git clone to msys64\home\Administrator\citus-10.2.5
+3. ./build.sh
 -------------------------------------------------------------------------------------------------------------------------
 
 ![Citus Banner](/citus-readme-banner.png)
